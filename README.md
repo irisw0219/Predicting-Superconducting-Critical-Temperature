@@ -1,2 +1,2 @@
 # Predicting-Superconducting-Critical-Temperature
-Machine Learning Modeling of Superconducting Critical Temperature based on the material's chemical properties
+The purpose of this project is to predict the superconducting critical temperature of a superconductor based on a set of selected features of chemical properties with different types of machine learning models developed in R.
