@@ -1,0 +1,1561 @@
+---
+title: "29433975_FIT5149 S2 Assignment 1"
+author: "Huan-yun Wang"
+date: "8/21/2019"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+version
+```
+
+# 1. Introduction
+## 1.1 Background
+Superconductors are materials that offer no resistance to electrical current. Prominent examples of superconductors include aluminium, niobium, magnesium diboride, cuprates such as yttrium barium copper oxide and iron pnictides. These materials only become superconducting at temperatures below a certain value, known as the critical temperature [nature.com]. The purpose of this project is to predict the critical tempreatures $Tc$ of a superconductor based on a set of selected features of chemical properties.
+
+
+## 1.2 Data Preparation
+#### 1.2.1 Libraries
+The libraries that will be used in this assignment
+```{r message=FALSE, warning=FALSE}
+library(caTools)
+library(caret)
+library(dplyr)
+library(glmnet)
+library(ggfortify)
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+```
+
+
+#### 1.2.2 Loading Dataset
+We are using the superconduct dataset from the Superconducting Material Database maintained by Japan’s National Institute for Materials Science(NIMS).
+
+
+It contains 21,263 material records, each of which have 82 columns: 81 columns corresponding to the features extracted and the last 1 column of the observed Tc values. Among those 81 columns, the first column is the number of elements in the material, the rest 80 columns are features extracted from 8 properties (each property has 10 features). 
+```{r}
+# Load the data
+superconductor <- read.csv("./superconduct/train.csv")
+# Display the dimensions
+cat("The superconductor dataset has", dim(superconductor)[1], "records, each with", dim(superconductor)[2],
+    "attributes.")
+```
+
+To get an idea on how our data looks like, we called head() and tail() functions to print out the first and last few rows of the dataset.
+```{r results='hide'}
+# first and last few rows of the dataset
+print(head(superconductor))
+print(tail(superconductor))
+```
+
+To get an idea on how our target values Tc distributed in our dataset, we used summary() and hist().
+We saw that the distribution is skewed right with an median of 20. All values are > 0, with a maximum at 185.
+```{r}
+summary(superconductor$critical_temp)
+```
+
+```{r}
+hist(superconductor$critical_temp, breaks = 80, main = "Tc", border="grey", col="dimgrey")
+```
+
+
+# 1.2.3 Methodology and Data Split
+Now, we are going to split our data into training set/validation set/test set for model selection, fitting, and assessment, using the typical 80:10:10 ratio. 
+Our methodology is to fit the model paremeter for any given complexity on our training set. 
+For every fitted model, we are going to assess the performance on the validation set. 
+We then, based on the performace, select the optimal set of tuning parameters. 
+Finally, for that specific resulting model, we assess a notion of the generalization error using our test set.
+```{r}
+# first we generate training set and test set
+split = sample.split(superconductor$critical_temp, SplitRatio = 0.8)
+training_set = subset(superconductor, split == TRUE)
+test_set = subset(superconductor, split == FALSE)
+
+# splits test set into validation set and test set
+split = sample.split(test_set$critical_temp, SplitRatio = 0.5)
+validation_set = subset(test_set, split == FALSE)
+test_set = subset(test_set, split == FALSE)
+
+# reveiew splitting result
+split <- c("supercondictor","training_set","validation_set","test_set")
+ratio <- c("100%", "80%","10%","10%")
+num_records <- c(dim(superconductor)[1],dim(training_set)[1],dim(validation_set)[1],dim(test_set)[1])
+num_attributes <- c(dim(superconductor)[2],dim(training_set)[2],dim(validation_set)[2],dim(test_set)[2])
+data_dim <- data.frame(split, ratio,num_records, num_attributes)
+data_dim
+```
+
+
+### 1.2.4 RMSE Function
+The defined RMSE function below will be used for calculating RMSE for the following analysis
+```{r}
+RMSE <- function(predicted, target) {
+    se <- 0
+    for (i in 1:length(predicted)) {
+        se <- se + (predicted[i]-target[i])^2
+    }
+    return (sqrt(se/length(predicted)))
+}
+```
+
+
+# 2. Exploratary Data Analysis
+### 2.1. Collinearity between features
+To have a general idea of our data, we first group then and generate subsuets and look at them one by one.
+
+From the 8 plots on the correlations of the features below, we can see there are some simillars pattern across all properties.
+Particularly, below groups seem to always have strong positive correlations: 
+    - mean/wtd_mean/gmean
+    - range/std/wtd_std
+    - entropy/wtd_entropy
+    
+The relationship makes sense, as these value are derived from one another, so they all depend on each other at some point. 
+
+**Subsets 1-4: 10 properties of atomatic_mass/fie/atomatic_radius/Density**
+```{r}
+# Feature 1: atomic_mass
+pairs(superconductor[2:11],main = "Relationship between Properties of Atomic Mass",col="dimgrey")
+# Feature 2: fie
+pairs(superconductor[12:21],main="Relationship between Properties of Fie",col="dimgrey")
+# Feature 3: atomic_radius
+pairs(superconductor[22:31],main="Relationship between Properties of Atomic Radius",col="dimgrey")
+# Feature 4: Density
+pairs(superconductor[32:41], main="Relationship between Properties of Density",col="dimgrey")
+```
+
+**Subsets 5-8: 10 properties of ElectronAffinity/FusionHeat/ThermalConductivity/Valence**
+```{r}
+# Feature 5: ElectronAffinity
+pairs(superconductor[42:51],main = "Relationship between Properties of ElectronAffinity",col="dimgrey")
+# Feature 6: FusionHeat
+pairs(superconductor[52:61],main="Relationship between Properties of FusionHeat",col="dimgrey")
+# Feature 7: ThermalConductivity
+pairs(superconductor[62:71],main="Relationship between Properties of ThermalConductivity",col="dimgrey")
+# Feature 8: Valence
+pairs(superconductor[72:81], main="Relationship between Properties of Valence",col="dimgrey")
+```
+
+### 2.2 Correlations Between Properties
+**Subset 1: Mean of the 8 properties**
+Mean values are also a good place to start, we will first plot out the correlation between pairs of all 9 variables, including number_of_elements and mean values of all 8 properties, to see if there is anything interesting between each pairs of attributes.
+```{r}
+subset_mean <- superconductor[,c(2,12,22,32,42,52,62,72,82)]
+dim(subset_mean)
+str(subset_mean)
+```
+
+From the plot we can see there's stronger relationship between the following pairs:
+  - mean_fie and mean_atomic_radius
+  - mean_atomic_mass and mean_Density
+  - mean_atomic_radius and mean_Density
+```{r}
+pairs(subset_mean[1:9], main="Mean of Properties",col = "dimgrey")
+```
+
+
+
+This subset of features tend to have similar kind of distribution of the target varialble critical_temp.
+```{r}
+par(mfrow = c(3, 3))
+hist(subset_mean$mean_atomic_mass, breaks = 20, main = "mean_atomic_mass", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_fie, breaks = 20, main = "mean_fie", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_atomic_radius, breaks = 20, main = "mean_atomic_radius", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_Density, breaks = 20, main = "mean_Density", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_ElectronAffinity, breaks = 20, main = "mean_ElectronAffinity", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_FusionHeat, breaks = 20, main = "mean_FusionHeat", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_ThermalConductivity, breaks = 20, main = "man_ThermalConductivity", border="dimgrey", col="dimgrey")
+hist(subset_mean$mean_Valence, breaks = 20, main = "mean_Valence", border="dimgrey", col="dimgrey")
+hist(subset_mean$critical_temp, breaks = 20, main = "critical_Temp", border="dimgrey", col="dimgrey")
+```
+
+
+
+**Subset 2: entropy of the 8 properties**
+```{r}
+subset_entropy <- superconductor[,c(6,16,26,36,46,56,66,76,82)]
+dim(subset_entropy)
+str(subset_entropy)
+```
+
+
+```{r}
+pairs(subset_entropy[1:9],main="Entropy of Properties",col="dimgrey")
+```
+
+
+
+We noticed this subset of features tend to have jagged and skewed distrubtion, except entropy_ThermalConductivity which is more gaussian distributed
+```{r}
+par(mfrow = c(3, 3))
+hist(subset_entropy$entropy_atomic_mass, breaks = 20, main = "entropy_atomic_mass", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_fie, breaks = 20, main = "entropy_fie", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_atomic_radius, breaks = 20, main = "entropy_atomic_radius", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_Density, breaks = 20, main = "entropy_Density", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_ElectronAffinity, breaks = 20, main = "entropy_ElectronAffinity", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_FusionHeat, breaks = 20, main = "entropy_FusionHeat", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_ThermalConductivity, breaks = 20, main = "entropy_ThermalConductivity", border="dimgrey", col="dimgrey")
+hist(subset_entropy$entropy_Valence, breaks = 20, main = "entropy_Valence", border="dimgrey", col="dimgrey")
+hist(subset_entropy$critical_temp, breaks = 20, main = "critical_Temp", border="dimgrey", col="dimgrey")
+```
+
+
+
+**Subset 3: std of the 8 properties**
+```{r}
+subset_std <- superconductor[,c(10,20,30,40,50,60,70,80,82)]
+dim(subset_std)
+str(subset_std)
+```
+
+```{r}
+pairs(subset_std[1:9],main="Standard Deviation of Properties",col="dimgrey")
+```
+
+
+Interestingly, this subset of features tend to have multimodal distribution.
+```{r}
+par(mfrow = c(3, 3))
+hist(subset_std$std_atomic_mass, breaks = 20, main = "std_atomic_mass", border="dimgrey", col="dimgrey")
+hist(subset_std$std_fie, breaks = 20, main = "std_fie", border="dimgrey", col="dimgrey")
+hist(subset_std$std_atomic_radius, breaks = 20, main = "std_atomic_radius", border="dimgrey", col="dimgrey")
+hist(subset_std$std_Density, breaks = 20, main = "std_Density", border="dimgrey", col="dimgrey")
+hist(subset_std$std_ElectronAffinity, breaks = 20, main = "std_ElectronAffinity", border="dimgrey", col="dimgrey")
+hist(subset_std$std_FusionHeat, breaks = 20, main = "std_FusionHeat", border="dimgrey", col="dimgrey")
+hist(subset_std$std_ThermalConductivity, breaks = 20, main = "std_ThermalConductivity", border="dimgrey", col="dimgrey")
+hist(subset_std$std_Valence, breaks = 20, main = "std_Valence", border="dimgrey", col="dimgrey")
+hist(subset_std$critical_temp, breaks = 20, main = "critical_Temp", border="dimgrey", col="dimgrey")
+```
+
+
+### 2.3 Principle Component Analysis
+In statistics, PCA is an unsupervised method that linearly projects data from a high dimensional space into a lower dimensional space. By maximising the variance of each of the new, uncorrelated dimensions (principal components), we are able to extract most of the underlying structure and relationships inherent to the original raw data. 
+
+
+Now, because we have observed strong multicollinearity in our data, we are now going to try to use PCA as a tool to better understand and visualise the variance in our dataset in lower dimensions.
+```{r}
+# Principal Component 
+pca_model <- prcomp(training_set[,c(1:81)], center = TRUE,scale. = TRUE)
+summary(pca_model)
+```
+The result tells us that we are actually able to capture up to almost 99% of variance in the entire dataset using only 30 principal components.
+
+
+Now we will quickly run a Principal Component Regression using some of the key principal components we just calculated and see how it goes. 
+```{r}
+pcr_model <- train(critical_temp ~ .,
+                         data = training_set,
+                         method = 'pcr',
+                         tuneGrid = expand.grid(ncomp = seq(2,40,2)),
+                         trControl = ,
+                         preProc = c('center','scale','BoxCox'))
+
+
+pcr_model$results
+pcr_model$bestTune
+```
+Not too well with just an rsqured of 0.7 wiht 40 principal componets. The underfitted model might be the result of a small number of principal components $d$, or the potential non-linear relationship between the predictors and response variable.
+Which we will be discussing more in the model selection section.
+
+
+But what are the significant features identified by this algorithm?
+```{r}
+pcr_features = varImp(pcr_model)
+
+pcr_top40 = data.frame(feature = pcr_features$importance%>% rownames(),
+           overall = pcr_features$importance$Overall)
+
+pcr_top40 = pcr_top40[order(pcr_top40$overall,decreasing = TRUE),][1:40,]
+
+# Generates a slice for top 40 important features
+pcrFeatures = pcr_top40$feature %>% as.character()
+
+# generates a subset from superconductor
+pcrFeatures <- superconductor %>% select(append(pcrFeatures,"critical_temp"))
+
+```
+
+We plot the histograms of all these features.
+We noticed that there are 4 features having similar distributions with critical_temp, including:
+
+  - wtd_gmean_Density
+  - wtd_mean_FusionHeat
+  - wtd_gmean_FusionHeat
+  - wtd_range_FusionHeat
+```{r}
+# log transformation on features with skewed dist
+N = ncol(pcrFeatures)
+colorcode <- rep("dimgrey",N)
+colorcode[N] <- "deeppink"
+par(mfrow=c(3, 3))
+for (i in 1:(N)) {
+  hist(pcrFeatures[,i], breaks = 20, main = paste(i,names(pcrFeatures)[i],sep="."), border=colorcode[i],
+       col=colorcode[i],cex.main=0.9)
+}
+```
+
+We further explore some interesting relationships between the significant features through data visualisation.
+```{r}
+ggplot(superconductor, 
+       aes(x =wtd_gmean_Density , y =critical_temp, color = wtd_std_ThermalConductivity)) +
+  geom_point(aes(size =number_of_elements), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 1") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+```{r}
+ggplot(superconductor, 
+       aes(x = number_of_elements , y = wtd_gmean_Valence, color = wtd_mean_Valence)) +
+  geom_point(aes(size = wtd_std_ThermalConductivity), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 2") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+```{r}
+ggplot(superconductor, 
+       aes(x = number_of_elements , y =wtd_gmean_Density , color = entropy_atomic_mass)) +
+  geom_point(aes(size = wtd_std_ThermalConductivity), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 3") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+
+```{r}
+ggplot(superconductor, 
+       aes(x = number_of_elements , y =entropy_atomic_mass, color =critical_temp )) +
+  geom_point(aes(size = mean_atomic_mass), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 4") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+
+
+```{r}
+ggplot(superconductor, 
+       aes(x = wtd_entropy_Valence , y =wtd_entropy_atomic_radius , color = wtd_entropy_FusionHeat)) +
+  geom_point(aes(size = range_atomic_radius), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 5") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+
+```{r}
+ggplot(superconductor, 
+       aes(x = wtd_gmean_Density, y =wtd_gmean_fie , color = wtd_std_fie)) +
+  geom_point(aes(size = range_fie), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 6") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+
+```{r}
+library(ggthemes)
+ggplot(superconductor, 
+       aes(x = wtd_gmean_Density, y =log(critical_temp), color =wtd_std_atomic_radius)) +
+  geom_point(aes(size = std_atomic_radius), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 7") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired")  +theme_light()
+```
+
+
+```{r}
+ggplot(superconductor, 
+       aes(x = range_fie, y =std_atomic_radius, color =wtd_std_atomic_radius)) +
+  geom_point(aes(size = wtd_mean_FusionHeat), alpha = 0.4) +
+  ggtitle("Data Exploration - Figure 8") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_distiller(palette = "Paired") +theme_light()
+```
+
+
+
+# 3. Model Developmemnt
+# 3.1 Linear regression
+### 3.1.1 Linear regression with all variables
+Our first model is going to be the simplest one, fitting a linear regression model to all of the 81 indicators.
+We fit the model by calling lm(), and then we call summary() to summarize the results.
+
+```{r}
+# Fitting Simple Linear Regression to the Training set
+fit1.1 = lm(formula = critical_temp ~ .,
+               data = training_set)
+```
+
+There are a few points we wanted to highlight here:
+    - The R-squred 0.74 indicates that the model explains 74% of the variation in Tc
+    - The F-statistic 608 has a p-value < 2.2e-16, so reject the null hypothesis (the model explains nothing) and accept the althernative hypothesis that the model is useful
+```{r}
+# prints important stats
+num_features1.1 <- dim(summary(fit1.1)$coefficients)[1]-1
+cat("Number of features in model 1.1 = ",num_features1.1)
+cat("\nRsquared = ",summary(fit1.1)$adj.r.squared)
+cat("\nF-statistic =", summary(fit1.1)$fstatistic[1])
+```
+
+
+### 3.1.1 Linear Regression with Stepwise Feature Selection
+Initially, we had all 81 in our model. But we doubted if they are all that important and necessary.
+To really find out the optmized subset of features, the all subset algorithms is an option. However, in this case, given the size of our dataset and the number of attibutes in hand, due to the fact that the computational complexity of such brute force algorithm is exponential. 
+
+Our other option is to do a sub-optimal approach such as stepwise algorithm for feature selection. How stepwise search (or Greedy search) works is you start with some set of possible features (or zero feature), and then you greedily walk through features, and select the best one to take or drop, and then you keep iterating. Here, we ran the step() function, a stpewise algorithm for feature selection by AIC, to find it out.
+
+Even though this procedure is significantly more computational efficient 
+
+  O($D^{2}$) >> O($2^{D}$) for large D
+  
+given the search data size and search time, we only did backwards and both direcation searches this time.
+```{r results='hide'}
+# Run step to remove unnecessary variables
+sback_fit1.1 = step(fit1.1,direction = "backward")
+sboth_fit1.1 = step(fit1.1,direction = "both")
+# extract AIC
+aic_fit1.1 <- extractAIC(fit1.1)
+aic_sback_fit1.1 <- extractAIC(sback_fit1.1)
+aic_sboth_fit1.1 <- extractAIC(sboth_fit1.1)
+```
+
+According to the step() results, the backward/both selection gave us the same results, removing 11 features from our model and achieved lower AIC.
+```{r}
+stepResults.fit1 = data.frame(
+  "num_predictors" = 
+    c("beginning.fit"=aic_fit1.1[1]-1,
+                      "step.backward"=aic_sback_fit1.1[1]-1,"step.both"=aic_sboth_fit1.1[1]-1),
+  "aic" = 
+    c("beginning.fit"=aic_fit1.1[2],
+             "step.backward"=aic_sback_fit1.1[2],"step.both"=aic_sboth_fit1.1[2])
+)
+stepResults.fit1
+```
+
+Now let's prepare to remove these features and update the model
+```{r}
+# feature removed by step()
+removed <- sback_fit1.1$anova$Step
+# string argument for updating the linear model
+formula = paste(".~.",paste(removed,collapse = ""),sep = "")
+formula
+```
+
+We updated our model 1.1 and removed the 7 features by using the string input we defined above.
+The updated model gave us a similar rsqured while using less predictors.
+```{r}
+# update fit1
+fit1.2 <- update(fit1.1,formula)
+
+# prints out stats
+num_features1.2 <- dim(summary(fit1.2)$coefficients)[1]-1
+cat("Number of features in model 1.2 = ",num_features1.2)
+cat("\nRsquared = ",summary(fit1.2)$adj.r.squared)
+```
+
+### 3.1.2 Linear Regression with Significant Variables
+In addition to the step() function above, we wanted to explore some other options in feature selection.
+Here, we used varImp() function to calculate importance of all 81 predictors initially in our first model.
+```{r}
+# train the model
+fit1.3 <- train(critical_temp ~., data = training_set, method = 'lm',preProcess="scale",trControl = trainControl(method = "cv"))
+
+# List of features with their importance scores
+importance1.3 <- varImp(fit1.3, scale=FALSE)
+print(importance1.3)
+```
+
+
+Let's organize the data nad rank the features by importance score and extract the top 60 for modeling
+```{r}
+# extracts reletive elements from the original output list
+rank = importance1.3$importance$Overall
+
+# generates a new list called features including columns of feature names and their rankings
+features <- training_set %>% select(-critical_temp) %>% names()
+important1.3 = data.frame(features, rank)
+important1.3 = important1.3[order(important1.3$rank,decreasing=TRUE),]
+
+# Generates a slice for top 60 important features
+top60 = important1.3[1:60,1] %>% as.character()
+top60
+```
+
+
+#### Re-fits Top60 Features
+This time, with using only 60 selected features, we achieve almost the same r-square 0.74 we obtained using up to 74 features previously.
+In this case, we would say thay the varImp() did better job than step() in feature selection, because it provides more effiecient solution for our model.
+```{r}
+# generates a subset of traninig data for top 60 features
+features_top60 <- append(top60,"critical_temp")
+training1.3 <- training_set %>% select(features_top60)
+
+# refits model using top60 features
+fit1.3 = lm(formula = critical_temp~ .,
+               data = training1.3)
+
+num_features1.3 <- dim(summary(fit1.3)$coefficients)[1]-1
+cat("Number of features in model 1.3 = ",num_features1.3)
+cat("\nRsquared = ",summary(fit1.3)$adj.r.squared)
+```
+
+#### Assessment on Validation Set
+Now that we have three fitted models at the moment, we are going to assess each of them on the validation set and compare their performance.
+```{r}
+# Model 1.1 Predicting Tc for training/validation set 
+pred_train1.1 = predict(fit1.1, newdata = training_set)
+rmse_train1.1 <- RMSE(pred_train1.1, training_set$critical_temp)
+pred_validation1.1 = predict(fit1.1, newdata = validation_set)
+rmse_v1.1 <- RMSE(pred_validation1.1, validation_set$critical_temp)
+rsq_v1.1 <- cor(pred_validation1.1, validation_set$critical_temp)^2
+
+# Model 1.2 Predicting Tc for training/validation set
+pred_train1.2 = predict(fit1.2, newdata = training_set)
+rmse_train1.2 <- RMSE(pred_train1.2, training_set$critical_temp)
+pred_validation1.2 = predict(fit1.2, newdata = validation_set)
+rmse_v1.2 <- RMSE(pred_validation1.2, validation_set$critical_temp)
+rsq_v1.2 <- cor(pred_validation1.2, validation_set$critical_temp)^2
+
+# Model 1.3 Predicting Tc for training/validation set
+pred_train1.3 = predict(fit1.3, newdata = training_set)
+rmse_train1.3 <- RMSE(pred_train1.3, training_set$critical_temp)
+pred_validation1.3 = predict(fit1.3, newdata = validation_set)
+rmse_v1.3 <- RMSE(pred_validation1.3, validation_set$critical_temp)
+rsq_v1.3 <- cor(pred_validation1.3, validation_set$critical_temp)^2
+```
+
+#### RMSE Analysis
+Comparing the three models, we believe that model 1.3 is a better one, since it was able to acheieve the similar results using less predictors.
+```{r}
+lin_reg_model1.1 <- c("num_predictors"=num_features1.1,
+             "adj.rsquared_train"=summary(fit1.1)$adj.r.squared,
+             "adj.rsquared_validation"=rsq_v1.1,
+             "rmse_validation"=rmse_v1.1)
+
+lin_reg_model1.2 <- c("num_predictors"=num_features1.2,
+           "adj.rsquared_train"=summary(fit1.2)$adj.r.squared,
+           "adj.rsquared_validation"=rsq_v1.2,
+           "rmse_validation"=rmse_v1.2)
+
+lin_reg_model1.3 <- c("num_predictors"=num_features1.3,
+           "adj.rsquared_train"=summary(fit1.3)$adj.r.squared,
+           "adj.rsquared_validation"= rsq_v1.3,
+           "rmse_validation"= rmse_v1.3)
+
+# creates a df by combing above vectors
+models.1 <- data.frame(lin_reg_model1.1,lin_reg_model1.2,lin_reg_model1.3)
+models.1
+```
+
+
+
+#### Diagnostic Plots 
+We will firt call autoplot() from ggfortify package to calculate and produce diagnostic plots and see if there are any serious problems inherented in our model.
+
+  - Residuals vs Fitted : shows the residuals are not evenly distributed around zero, this suggests that the assumption that the relationship is linear is not reasonable, also the variances of the error terms are unequal.
+  - Normal Q-Q indicates the plot tells us there's evidence of non-linearity
+  - Scale-Location plot tells us the residuals are not spread equally along the ranges of predictors
+  - Residuals vs Leverage helps us to find influential cases, but there seems no such case here
+
+```{r}
+autoplot(fit1.3)
+```
+
+
+
+#### Generalization of Error
+Since model 1.3 has been selected as our first official model based on the performance on the validation, we are now going to assess its performance on the test set. We then assume the test errors as an approximation of our generalization error.
+```{r}
+# Predicting Tc for training/test
+pred_test1.3 = predict(fit1.3, newdata = test_set)
+rmse_test1.3 <- RMSE(pred_test1.3,test_set$critical_temp)
+# Calculates RMSE of training pred
+cat("\nLINEAR REGRESSION MODEL 1.3: RMSE for the test predictions =", rmse_test1.3)
+```
+
+#### Visualization of Gernerailzed Error
+As we can see, we got this very similar RMSE that we have seen on the training/validation set.
+To get a better idea on the fitness, we visualized the perfomance using ggplot().
+
+From the plot, we could tell that, althoght not that strong, there's still a linear relationship between the true values and the predicted ones. That should be a fair representation on the fitness of this model.
+```{r}
+# Visualizing the fit
+Linear_regression_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp, y = pred_test1.3),
+            colour = 'gold2',alpha=0.5,size=3) +
+  ggtitle('Linear Regression') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+Linear_regression_test 
+```
+
+
+
+### 3.1.3 Linear Regression with Transfored Dataset
+To further improve our model, we are going to try and generate two-way interaction terms for fitting our second model. Particularly, we are going to generate interaction terms using features with low collinearity, since we know that collinearity, which is the correlation between predictor variables supply redundant information to the model, and may consequently effect model performance.
+
+Thus, the first step is to pin down these features using the findCorrelation() function. By setting the cutoff threshold as 0.8, we got 29 selected features
+
+#### Collinearity Analysis
+```{r}
+# Identifies highly correlated terms
+correlationMatrix <- cor(training_set[,1:81])
+
+# findCorrelation() searches through a correlation matrix 
+# and returns a vector of integers corresponding to columns to remove to reduce pair-wise correlations.
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.8)
+cat("Number of highly correlated features (to be removed) =",length(highlyCorrelated))
+
+# creates a subset containing only features with correlation < 0.8
+lowCor = training_set[,-highlyCorrelated]
+cat("\nNumber of features with correlation lower than 0.8 (to be selected) =",length(lowCor)-1)
+```
+
+
+#### Skewness Analysis
+As we looked at the histograms of all 29 features selected based on the collinearity, we found that most of the features have weird distributions. 
+```{r}
+# looks at distribution of each feature
+par(mfrow=c(3, 3))
+N = ncol(lowCor) -1
+for (i in 1:N) {
+  hist(lowCor[,i], breaks = 20, main = paste(i,names(lowCor)[i],sep = ". "), border="grey", col="darkgrey")
+}
+```
+
+#### Account for the Heteroscedasticity
+Since there are too many features to look at at a time, we automatically generated histograms for those features (those do not have any zero values) with log transformation, and check the distributions again of each one of them.
+
+We spotted the three of them (highlighted in yellow) have become more gaussian in their distributions after log transformation.
+These following five features below with log transformations will be included in our model:
+
+  - gmean_fie
+  - mean_Density
+  - gmean_ElectronAffinity
+  - wtd_gmean_ElectronAffinity
+  - mean_FusionHeat
+  
+```{r}
+# log transformation on features with skewed dist
+par(mfrow=c(3, 3))
+N = ncol(lowCor) -1
+colorcode <- rep("gray87",29)
+colorcode[c(3,9,13,14,18)] <- "goldenrod"
+for (i in 1:N) {
+  if (min(lowCor[,i])>0){
+    hist(log(lowCor[,i]), breaks = 20, main = paste(i,paste("log(",names(lowCor)[i],")",sep = ""),sep = ". "), border=colorcode[i], col=colorcode[i])
+  }
+}
+```
+
+
+We removed the three features with skewed distributions and added the log transformed terms back into our string argument for fitting the model
+```{r}
+# generate a subset of features with low correlation coeficients, while excluding 3 highly skewed terms
+features2.1 <- lowCor %>% select(-c(3,9,13,14,18))%>%select(-critical_temp) %>% names()
+
+# adding back the three originally skewed terms after applying log transformation, and generates an string argument for updating the model fit
+formula <- paste(paste(features2.1,collapse = "+"),"log(gmean_fie) + log(mean_Density) + log(gmean_ElectronAffinity)+log(wtd_gmean_ElectronAffinity)+log(mean_FusionHeat))^2",sep = "+")
+formula <- paste0(".~. +(",formula)
+formula
+```
+
+#### Fit the interaction terms (feature crosses) to the model
+The rsquare value turned out to be 0.82, much higher than the previous 0.74.
+However, we have also seen a big jump in the number of features. 
+Maybe some of the features are not that important and thus can be excluded. To reduce the number of features while trying to keep up with the good performance, we are going to do feature selection later.
+```{r}
+# refits the model by updating model 1
+fit2.1 <- update(fit1.3,formula,data=training_set)
+
+# prints stats to console
+num_features2.1 <- dim(summary(fit2.1)$coefficients)[1]-1
+cat("MODEL 2.1: number of predictors = ",num_features2.1)
+cat("\nTraining adj.rsquared = ",summary(fit2.1)$adj.r.squared)
+```
+
+#### Diagnostic plots 
+  - Residuals vs Fitted plot tells us the residuals have non-linear patterns
+  - Normal Q-Q indicates the residuals are not normally distributed.
+  - Scale-Location plot suggests that the residuals are not spread equally along the ranges of predictors, as the residuals do not appear randomly spread
+  - Residuals vs Leverage gives us a typical look when there is no influential case
+
+```{r}
+autoplot(fit2.1)
+```
+
+
+Performance of model 2.1 on the validation set was better than our previous models, as we got a lower RMSE here
+```{r}
+# Predicting Tc for validation set
+pred_v2.1 <- predict(fit2.1, newdata = validation_set)
+
+# Calculates RMSE
+rmse_v2.1 <- RMSE(pred_v2.1, validation_set$critical_temp)
+cat("\nMODEL 2.1: Validation RMSE =", rmse_v2.1)
+
+# Rsquared
+rsq_v2.1 <- cor(pred_v2.1, validation_set$critical_temp)^2
+cat("\nValidation adj.rsquared = ",rsq_v2.1)
+```
+
+### 3.1.4 Linear Regression with Regularisation
+As more features we use, the more complex the model becomes, and more likely  it becomes overfit. 
+And high complexity models could have low bias, but high variance.
+In this case, we want to trade off between bias and variance to get to that sweet spot of having good predictive performance.
+
+One way to automatically balance between bias and variance is called regularization.
+To balance between the two measures, we introduced a new term $lambda$ and modified the cost function as below:
+
+###### Total Cost = (Measure of Fit) + $\lambda$*(Magnitude of Coefficients)
+
+In essence, the tuning parameter $\lambda$ controls model complexity, and controls such bias/variance trade-off.
+
+In this section, we are going to use two regulariztion techniques: Ridge Regression and Lasso Regression to fit to our second model.
+
+
+
+
+#### Data preparation
+When we ran the lm() function on the interaction terms, we input this string argument *critical_temp ~(.)^2*.
+But it does not work for the glmnet function, as takes matices as input arguments. So we need to manually create the set of features.
+
+To generate the interaction terms, the first step is to put together all the selected features (with low collinearity) as a matrix using model.matrix(). After the interaction terms are generated , we convert the matrix back to dataframe, so we can easily combine the top 60 important features used in model 1 and the interaction terms as the training set for regularization.
+```{r}
+# creates a copy of 60 important features used in model 1 
+training2.2 <- training1.3
+validation2.2 <- validation_set %>% select(names(training2.2))
+test2.2 <- test_set  %>% select(names(training2.2))
+
+# generates subset of features with low correlation while replaces the originally skewed terms with log transformed terms
+# generates string argument for later fitting the model.matrix()
+features_lowCor <- lowCor %>% select(-c(3,9,13))%>%select(-critical_temp) %>% names()
+formula <- paste("critical_temp~(",paste(paste(features_lowCor,collapse = "+"),"log(gmean_fie) + log(mean_Density) + log(gmean_ElectronAffinity))^2",sep = "+"),sep="")
+formula
+```
+
+Prepares training set for regularization...
+```{r}
+# creates a matrix for interaction terms using the string argument we created above
+train_interact <- model.matrix(critical_temp~(mean_atomic_mass+std_atomic_mass+wtd_gmean_fie+wtd_range_fie+mean_atomic_radius+wtd_range_atomic_radius+std_atomic_radius+wtd_entropy_Density+wtd_range_Density+wtd_std_Density+wtd_gmean_ElectronAffinity+wtd_entropy_ElectronAffinity+wtd_range_ElectronAffinity+std_ElectronAffinity+mean_FusionHeat+wtd_range_FusionHeat+std_FusionHeat+mean_ThermalConductivity+wtd_gmean_ThermalConductivity+entropy_ThermalConductivity+wtd_entropy_ThermalConductivity+wtd_range_ThermalConductivity+std_ThermalConductivity+gmean_Valence+range_Valence+wtd_range_Valence+log(gmean_fie) + log(mean_Density) + log(gmean_ElectronAffinity))^2,training_set)[,-1]
+
+# removes duplicates by indexing and filtering
+train_interact <- train_interact %>% as.data.frame()
+train_interact <- train_interact[which(!names(train_interact) %in% names(training2.2))]
+training2.2 <- cbind(train_interact,training2.2)
+dim(training2.2)
+```
+
+Same procedure of preparing validation set for regulariztion...
+```{r} 
+# creates a set of features including interaction terms (test set)
+v_interact <- model.matrix(critical_temp~(mean_atomic_mass+std_atomic_mass+wtd_gmean_fie+wtd_range_fie+mean_atomic_radius+wtd_range_atomic_radius+std_atomic_radius+wtd_entropy_Density+wtd_range_Density+wtd_std_Density+wtd_gmean_ElectronAffinity+wtd_entropy_ElectronAffinity+wtd_range_ElectronAffinity+std_ElectronAffinity+mean_FusionHeat+wtd_range_FusionHeat+std_FusionHeat+mean_ThermalConductivity+wtd_gmean_ThermalConductivity+entropy_ThermalConductivity+wtd_entropy_ThermalConductivity+wtd_range_ThermalConductivity+std_ThermalConductivity+gmean_Valence+range_Valence+wtd_range_Valence+log(gmean_fie) + log(mean_Density) + log(gmean_ElectronAffinity))^2,validation_set)[,-1]
+
+
+v_interact <- v_interact %>% as.data.frame()
+v_interact <- v_interact[which(!names(v_interact) %in% names(validation2.2))]
+validation2.2 <- cbind(v_interact,validation2.2)
+dim(validation2.2)
+```
+
+Still the same proceduer preparing test set for regulariztion...
+```{r} 
+# creates a set of features including interaction terms (test set)
+test_interact <- model.matrix(critical_temp~(mean_atomic_mass+std_atomic_mass+wtd_gmean_fie+wtd_range_fie+mean_atomic_radius+wtd_range_atomic_radius+std_atomic_radius+wtd_entropy_Density+wtd_range_Density+wtd_std_Density+wtd_gmean_ElectronAffinity+wtd_entropy_ElectronAffinity+wtd_range_ElectronAffinity+std_ElectronAffinity+mean_FusionHeat+wtd_range_FusionHeat+std_FusionHeat+mean_ThermalConductivity+wtd_gmean_ThermalConductivity+entropy_ThermalConductivity+wtd_entropy_ThermalConductivity+wtd_range_ThermalConductivity+std_ThermalConductivity+gmean_Valence+range_Valence+wtd_range_Valence+log(gmean_fie) + log(mean_Density) + log(gmean_ElectronAffinity))^2,test_set)[,-1]
+
+
+test_interact <- test_interact %>% as.data.frame()
+test_interact <- test_interact[which(!names(test_interact) %in% names(test2.2))]
+test2.2 <- cbind(test_interact,test2.2)
+dim(test2.2)
+```
+
+Before we fit data to the Ridge regression, let's do not forget to convert our dataframes into matices.
+```{r}
+# transforms df to matrix as input args of the glmnet()
+xmat_train <- training2.2 %>% select(-critical_temp) %>% as.matrix()
+ymat_train <- training2.2 %>% select(critical_temp) %>% as.matrix()
+xmat_v <- validation2.2 %>% select(-critical_temp) %>% as.matrix()
+ymat_v <- validation2.2 %>% select(critical_temp) %>% as.matrix()
+xmat_test <- test2.2 %>% select(-critical_temp) %>% as.matrix()
+ymat_test <- test2.2 %>% select(critical_temp) %>% as.matrix()
+
+
+dim(xmat_train)
+dim(xmat_v)
+dim(xmat_test)
+```
+
+#### Fit Training Data to L2 Ridge Regression
+Now that the data is ready, we ready to fit the data using 10-fold cross validation to optimise labda for L2 Shrinkage Penalty.
+```{r}
+# fit a ridge model with cross-validation using the cv.glmnet() function
+ridge2.2 <- cv.glmnet(xmat_train, ymat_train, type.measure="mse", 
+  alpha=0, family="gaussian")
+plot(ridge2.2)
+```
+
+
+#### Ridge Assessment on Validation Set
+Now we will use the predict() function to apply ridge model to the training set and the validation set using the optimimal lambda value.
+
+The optimal $\lambda$ can be extracted by *lambda.1se*, which is $\lambda$*, the lambda value resulted in the simplest model (the model with the fewest non-zero parameters). We know that the lambda value was within 1 standard error of the lambda that rsulted in the smallest total cost.
+
+
+**predicts on the validation set**
+```{r}
+# using the optimised lambda to predict
+cat("Optimized lambda =",ridge2.2$lambda.1se)
+
+# Coefficients
+coef_ridge2.2 <- coef(ridge2.2)[-1, 1]
+coef_ridge2.2 <- coef_ridge2.2[order(abs(coef_ridge2.2), decreasing = TRUE)]
+
+num_coef_ridge2.2 <- length(coef_ridge2.2[coef_ridge2.2 >0])
+cat("\nnumber of predictors = ",num_coef_ridge2.2)
+
+# predicts on training set
+pred_train_ridge2.2 <- predict(ridge2.2, s=ridge2.2$lambda.1se,newx=xmat_train)
+
+# MSE
+rmse_train_ridge2.2 <- RMSE(pred_train_ridge2.2, training_set$critical_temp)
+cat("\nTraining RMSE of Ridge regression on model 2 =",rmse_train_ridge2.2)
+
+# Rsquared
+rsq_train_ridge2.2 <- cor(pred_train_ridge2.2, training_set$critical_temp)^2
+cat("\nTraining adj.rsquared of Ridge regression on model 2 = ",rsq_train_ridge2.2)
+```
+
+
+**predicts on the validation set**
+```{r}
+# predict on validation set
+pred_v_ridge2.2 <- predict(ridge2.2, s=ridge2.2$lambda.1se,newx=xmat_v)
+
+# MSE
+rmse_v_ridge2.2 <- RMSE(pred_v_ridge2.2, validation_set$critical_temp)
+cat("\nValidation RMSE of Ridge regression on model 2 =",rmse_v_ridge2.2)
+
+# Rsquared
+rsq_v_ridge2.2 <- cor(pred_v_ridge2.2, validation_set$critical_temp)^2
+cat("\nValidation adj.rsquared of Ridge regression on model 2 = ",rsq_v_ridge2.2)
+```
+
+
+
+#### Fit Training Data to Lasso Regularisation
+Now we move on to fit the data cv.glmnet() to optimise lambda for L1 Shrinkage Penalty.
+
+From the plot blow, we see that as lambda increases, the number of features shrinks, and the mean-squared error increases. When $\lambda$ approaches zero, we get minimized MSE.
+```{r}
+#### alpha = 1, Lasso Regression
+################################
+# fit a lasso model with cross-validation using the cv.glmnet() function
+lasso2.2 <- cv.glmnet(xmat_train, ymat_train, type.measure="mse", 
+  alpha=1, family="gaussian")
+
+plot(lasso2.2)
+```
+
+Similarly, we will fit the model to the training set and the validation set using the optimized lambda value.
+```{r}
+# min lambda
+cat("Optimized lambda =",lasso2.2$lambda.1se)
+
+# coefficients
+coef_lasso2.2 <- coef(lasso2.2)[-1, 1]
+coef_lasso2.2 <- coef_lasso2.2[order(abs(coef_lasso2.2), decreasing = TRUE)]
+num_coef_lasso2.2 <- length(coef_lasso2.2[coef_lasso2.2 >0])
+cat("\nnumber of predictors = ",num_coef_lasso2.2)
+
+# Predict Tc on Training set
+pred_train_lasso2.2 <- predict(lasso2.2, s=lasso2.2$lambda.1se, newx=xmat_train)
+# MSE
+rmse_train_lasso2.2 <- RMSE(pred_train_lasso2.2, training_set$critical_temp)
+cat("\nTraining MSE of Ridge regression on model 2 =",rmse_train_lasso2.2)
+
+# Rsquared
+rsq_train_lasso2.2 <- cor(pred_train_lasso2.2, training_set$critical_temp)^2
+cat("\nTraining adj.rsquared of Lasso regression on model 2 = ",rsq_train_lasso2.2)
+```
+
+
+#### Lasso Assessment on Validation Set
+As we predicted on the validation set using the optimized lambda value, we found that Lasso Regularization gave us better results.
+```{r}
+# predict on validation set
+pred_v_lasso2.2 <- predict(lasso2.2, s=lasso2.2$lambda.1se, newx=xmat_v)
+
+# MSE
+rmse_v_lasso2.2 <- RMSE(pred_v_lasso2.2,validation_set$critical_temp)
+cat("\nValidation MSE of Lasso regression on model 2 = ",rmse_v_lasso2.2)
+
+# R-squared
+rsq_v_lasso2.2 <- cor(pred_v_lasso2.2, validation_set$critical_temp)^2
+cat("\nValidation adj.r-squared of Lasso regression on model 2 = ",rsq_v_lasso2.2)
+```
+
+#### RMSE Analysis
+Comparing the three models, we believe that Lasso did a better job in regulariztion given the better r-squared, lower MSE, and fewer number of coefficients. 
+
+The result makes sense because Lasso regression is known for excluding useless variables from equations and making the final equation simpler and easier to interpret (and we assumed that most of the generated terms in our second model are not that important). So it is a better than Ridge regression at reducing the variance in models that contain lots of useless predictors.  In contrast, Ridge regression tend to do a little better when most variables are useful.
+```{r}
+# creates vectors of stats
+lin_reg_trans <- c("num_predictors"=num_features2.1,
+             "adj.rsquared_train"=summary(fit2.1)$adj.r.squared,
+             "adj.rsquared_validation"=rsq_v2.1,
+             "rmse_validation"=rmse_v2.1)
+
+lin_reg_ridge <- c("num_predictors"=num_coef_ridge2.2, 
+           "adj.rsquared_train"=rsq_train_ridge2.2,
+           #"mse_train"=mse_train_ridge2.2,
+           "adj.rsquared_validation"=rsq_v_ridge2.2,
+           "rmse_validation"=rmse_v_ridge2.2)
+
+lin_reg_lasso <- c("num_predictors"=num_coef_lasso2.2, 
+           "adj.rsquared_train"=rsq_train_lasso2.2,
+           #"mse_train"=mse_train_lasso2.2,
+           "adj.rsquared_validation"= rsq_v_lasso2.2,
+           "rmse_validation"= rmse_v_lasso2.2)
+
+# creates a df by combing above vectors
+models.2 <- data.frame(lin_reg_trans,lin_reg_ridge,lin_reg_lasso)
+models.2
+
+```
+
+#### Skewness Analysis
+Lasso regression achieved 0.77 in rsquared with fewer attributes.
+
+To get a better idea, we took a closer look at the distribution of these important features in the Lasso Model. However, due to the number of features, we only look at those with coefficient > 0.01. 
+
+We found that most of the features have weird and wild distributions. Again, let's try to do log transformation automatically on all of them and see if they look more gaussian
+```{r}
+# checks skewness of important features in Lasso model
+features <- names(coef_lasso2.2[coef_lasso2.2 >0.01])
+features_lasso <- training2.2 %>% select(features)
+
+# plot hist
+par(mfrow=c(3, 3))
+N = ncol(features_lasso)
+for (i in 1:N) {
+  hist(features_lasso[,i], breaks = 20, main = paste(i,names(features_lasso)[i],sep = ".\n"), border="grey", col="darkgrey")
+}
+```
+
+Some of the features became more gaussian in their distribution after log transformation.
+
+  - log(gmean_ElectronAffinity)
+  - log(wtd_gmean_ElectronAffinity:gmean_Valence)
+```{r}
+# log transformation on features with skewed dist
+N = ncol(features_lasso)
+colorcode <- rep("grey",N)
+colorcode[c(45,53)] <- "deeppink1"
+
+par(mfrow=c(3, 3))
+for (i in 1:N) {
+  if (min(features_lasso[,i])>0){
+    hist(log(features_lasso[,i]), breaks = 20, main = paste(i,paste("log(",names(features_lasso)[i],")",sep = ""),sep = ".\n"), border=colorcode[i], col=colorcode[i],cex.main=0.9)
+  }
+}
+
+```
+
+#### Generalization of Error
+Once again, we are going to assess the performance of Model 2.2 (with Lasso Regression). 
+Then, we are going to assume the test errors as an approximation of our generalization error.
+```{r}
+# predict on test set
+pred_test_lasso2.2 <- predict(lasso2.2, s=lasso2.2$lambda.1se, newx=xmat_test)
+
+# MSE
+rmse_test2.2 <- RMSE(pred_test_lasso2.2, test_set$critical_temp)
+cat("\nLinear Regression with Regularisation: test MSE = ",rmse_test2.2)
+
+# R-squared
+rsq_test2.2 <- cor(pred_test_lasso2.2, test_set$critical_temp)^2
+cat("\nLinear Regression with Regularisation: test adj.rsquared = ",rsq_test2.2)
+```
+
+
+#### Visualization of Generalized Error
+The visualization on the test results once agian tell the same story.
+The weak relationship between X values and Y values appeared within the interval of Y < 100.
+```{r}
+# Visualizing performance/error on test set
+Lasso_regression_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp, y = pred_test_lasso2.2),
+             colour = 'magenta',alpha=0.5,size=3) +
+  ggtitle('Lasso Regression') +
+  ylab('Prediction') +
+  xlab('True Value') + 
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+Lasso_regression_test  
+```
+
+
+### 3.1.5 Linear Regression with Feature Crosses 
+We suspect that the relationship between features and the label was a non-linear one as we saw that the linear regression trainined on the raw features and even the log-transformed ones did poorly on the test set. Here we try to solve a nonlinear problem through feature enginerring to generate feature crosses. 
+
+A feature cross is a synthetic feature that encodes nonlinearity in the feature space by multiplying two or more input features together. (The term cross comes from cross product). 
+
+Let's try brute force all the possible combinations of two-way crosses all at once: $x_3 = x_{1} x_2$ (Although we may suffer from heavy complexity of the model due to a significant increas in the number of features and at at the risk of overfitting, we still wanted to give it a shot!)
+
+Also, due to the skewness we observed in the distribution of critical_temp, our target variable, we are going to take the log of it. 
+Let's try and see if it helps improve the prediction accuracy.
+```{r}
+par(mfrow=c(2, 2))
+hist(superconductor$critical_temp, breaks = 25, main = "Tc", border="grey", col="dimgrey")
+hist(log(superconductor$critical_temp), breaks = 25, main = "log(Tc)", border="grey", col="dimgrey")
+```
+
+### 3.1.5.1 Linear Regression on two-way feature crosses
+fit data to the linear regression model.
+```{r}
+fit3.1 = lm(log(critical_temp)~(.)^2,data = training_set)
+```
+
+
+This time, we got a very high R-squared of a little over 0.9 using up to 3321 predictors. 
+Although it is a good number to see here, we might still wonder if it is the result of over-fitting given to the complexity.
+
+We will check how good our test data fits the model to decide that this is really a useful model.
+```{r}
+num_features3.1 <- dim(summary(fit3.1)$coefficients)[1]-1
+cat("Number of features in model 3.1 = ",num_features3.1)
+cat("\nRsquared = ",summary(fit3.1)$adj.r.squared)
+```
+
+#### Diagnostic plots 
+We run a residual analysis by plotting the diagnostic plots and try to understand what is going on with the residuals.
+
+  - Residuals vs Fitted : shows the residuals are almost evenly distributed around zero, this suggests that the model doesn’t capture the non-linear relationship
+  - Normal Q-Q plot shows that the residuals do not follow the straight line well, indicating non-normal distribution
+  - Scale-Location plot tells us the residuals are not randomly spread, violating the assumption of equal variance (homoscedasticity)
+  - Residuals vs Leverage shows little evididence of influencial cases
+```{r}
+autoplot(fit3.1)
+```
+
+
+#### 3.1.5.2 Three-way feature crosses on low correlated terms
+Now that we have got a good rsquared by generating a complex set of two-way interaction terms: $x_4 = x_{1} x_2 x_3$, we wondered if three-way get us even better results.
+
+However, the computational complexity of generating three-way interactions (exponential) on all 81 features is likely going to crash our model, so we decided to try to narrow down our base features. Here, we adopted the lowCor subset we created earlier based on the collinearity. So the number of base features went down from 81 to 30. So we expected to see a total of a little more than 4000 indicators( $\frac {29*29*29}{3!}$ + 29 ) in our three-way-interaction model.
+```{r}
+lowCor %>% select(-critical_temp) %>% ncol()
+```
+
+Fitting around 4089 indicators to the model, we got an rsquared of 0.91 this time on the traning data. 
+
+Compared to our two-way-interaction model with 3321 indicators in it, we only improved 0.01 in rsquared value aftering increasing the model complexity by having 768 more terms. This tells us that most of the predictors in are rather useless. Let's still try predicting Tc on the validation set and assess the performance before we decide which model is better.
+
+```{r}
+fit3.2 = lm(log(critical_temp)~(.)^3,data = lowCor)
+
+# prints stats to console
+num_features3.2 <- dim(summary(fit3.2)$coefficients)[1]-1
+cat("Number of features in model 3.2 = ",num_features3.2)
+cat("\nRsquared = ",summary(fit3.2)$adj.r.squared)
+```
+
+
+#### RMSE of 2-way and 3-way Feature Crosses
+Let's Predict Tc for training set and validation set and calculated the RMSE
+```{r}
+## MODEL 3.1
+# Predicting Tc for training/validation set
+predLog_train3.1 <- predict(fit3.1, newdata = training_set)
+pred_train3.1 <- exp(predLog_train3.1)
+
+predLog_v3.1 <- predict(fit3.1, newdata = validation_set)
+pred_v3.1 <- exp(predLog_v3.1)
+
+# Calculates RMSE of training pred
+rmse_train3.1 <- RMSE(pred_train3.1,training_set$critical_temp)
+rmse_v3.1 <- RMSE(pred_v3.1, validation_set$critical_temp)
+
+
+## MODEL 3.2
+# Predicting Tc for training/validation set
+predLog_train3.2 <- predict(fit3.2, newdata = training_set)
+pred_train3.2 <- exp(predLog_train3.2)
+
+predLog_v3.2 <- predict(fit3.2, newdata = validation_set)
+pred_v3.2 <- exp(predLog_v3.2)
+
+# Calculates RMSE of training pred
+rmse_train3.2 <- RMSE(pred_train3.2,training_set$critical_temp)
+rmse_v3.2 <- RMSE(pred_v3.2, validation_set$critical_temp)
+
+```
+
+
+#### Assessment on Validation Set
+From the table we put together below, we found something interesting.
+
+The MSE of predictions of model 3.1 and model 3.2 on the training set was only a little over 12, while it became an incredibly huge number for the validation set. So there's clearly a sign of overfitting, where we got a low mse on the training set while an extremely bad one on the validation set.
+
+But is it hopeless? 
+
+Did the model do a really terrible job predicting Tc in general? Or was there just a few extreme predictions that caused such crazy MSE?
+Let's find out by simply plotting the results.
+```{r}
+lin_reg_featureCrosses2 <- c("num_predictors"=num_features3.1,
+              "adj.rsquared_train"=round(summary(fit3.1)$adj.r.squared,4),
+              "rmse_train"=round(rmse_train3.1,4),
+              "rmse_validation"="huge")
+
+lin_reg_featureCrosses3 <- c("num_predictors"=num_features3.2,
+              "adj.rsquared_train"=round(summary(fit3.2)$adj.r.squared,4),
+              "rmse_train"=round(rmse_train3.2,4),
+              "rmse_validation"="incredibly huge")
+
+models.featureCrosses <- data.frame(lin_reg_featureCrosses2,lin_reg_featureCrosses3)
+models.featureCrosses
+```
+
+#### Visualization of Error on Training Set 
+There is a strong relationship going on between the true values and the predicted values. 
+That actually explains why we got such a low mse on the training set.
+```{r}
+# Visualizing the predicted values
+ggplot() +
+  geom_point(aes(x = training_set$critical_temp, y = pred_train3.1),
+            colour = 'orangered3',alpha=0.5,size=3) +
+  ggtitle('Linear regression model with two-way feature crosses on trainig set') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+    theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+
+#### Visualization of Error on Validation Set  
+Let's move on to the test set results.
+
+The plot was bizzare at first glance! 
+
+Then as we looked at the scale of y-axis, we soon realized that there seemed to be a few wildly extreme predictions on the validation set.
+```{r}
+# Visualizing the predicted values excluding extreme predictions
+ggplot() +
+  geom_point(aes(x = validation_set$critical_temp, y = pred_v3.1),
+            colour = 'orangered3',alpha=0.5,size=3) +
+  ggtitle('Linear regression model with two-way feature crosses on validation set') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+
+As discussed, we suspected there might be some extreme predictions on the validation set. 
+
+So we filter and count the number of predicted values that were greater than 134, the maximum value in the validation set. 
+
+It turned out that there were 24 extreme values there in the predictions, which account for around 1% of the total predictions. Now let's filter them out before plotting, otherwise the scale of y-axis would just shift significanly.
+```{r}
+high <- max(validation_set$critical_temp)
+filtered3.1 <- pred_v3.1[pred_v3.1 < high]
+num_extremes3.1 <- length(pred_v3.1) - length(filtered3.1)
+cat("Linear regression model with Feature Crosses: Number of extreme predictions on the validation set = ",num_extremes3.1)
+cat("\nLinear regression model with Feature Crosses: Proportion of extreme predictions in the validation set =",num_extremes3.1/nrow(validation_set))
+```
+
+
+This time, we got a pretty neat plot. There's clearly a strong positive corelation between the true values and the predicted ones. 
+As an accurate prediction has an Y=X relationship, we are not too far from that here. We clearly did a better job with this mode than we did with the previous ones.
+```{r}
+# Visualizing the predicted values excluding extreme predictions
+ggplot() +
+  geom_point(aes(x = validation_set$critical_temp[pred_v3.1 < high], y = filtered3.1),
+            colour = 'orangered3',alpha=0.5,size=4) +
+  ggtitle(paste0('Linear regression model with two-way feature crosses on validation set \n(with ',num_extremes3.1,' extreme predictions removed)')) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+
+
+#### Visualization of Error on Training Set 
+Now we'll plot the preformance for model 3.2, which has more than 4000 predictors.
+Again, there's a strong linear relationship between X and Y as we fitted the training set.
+```{r}
+# Visualizing the predicted values
+ggplot() +
+  geom_point(aes(x = training_set$critical_temp, y = pred_train3.2),
+            colour = 'rosybrown',alpha=0.5,size=3) +
+  ggtitle('Linear regression model with three-way feature crosses on training set') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+
+
+#### Visualization of Error on Validation Set 
+As expected, we got a few of the crazy predictons again.
+Let's find out how many of the predictions are overly extreme this time.
+```{r}
+# Visualizing the predicted values excluding extreme predictions
+ggplot() +
+  geom_point(aes(x = validation_set$critical_temp, y = pred_v3.2),
+            colour = 'rosybrown',alpha=0.5,size=3) +
+  ggtitle('Linear regression model with three-way feature crosses on validation set') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+Turned out there are 43 predicted values > max(test_set.Tc)
+That was more than double the number we have observed in our model 3.1. 
+Similarly, let's filter them out and plot again to see the overall performance of model 3.2
+```{r}
+filtered3.2 <- pred_v3.2[pred_v3.2 < high]
+num_extremes3.2 <- length(pred_v3.2) - length(filtered3.2)
+cat("Linear Model with Feature Crosses (3 way): Number of extreme predictions on the validation set = ",num_extremes3.2)
+cat("\nLinear Model with Feature Crosses (3 way): Proportion of extreme predictions in the validation set =",num_extremes3.2/nrow(validation_set))
+```
+
+
+After removing those extreme cases, we got a much nicer plot again.
+The predictions had a strong linear relationship with the true Tc.
+```{r}
+# Visualizing the predicted values excluding extreme predictions
+ggplot() +
+  geom_point(aes(x = validation_set$critical_temp[pred_v3.2 < high], y = filtered3.2),
+            colour = 'rosybrown',alpha=0.5,size=4) +
+  ggtitle(paste0('Linear Model with Feature Crosses (3 way) Performance on Validation Set \n(with ',num_extremes3.2,' extreme predictions removed)')) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + 
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+```
+
+#### Comparing 2-way and 3-way Feature Crosses
+Looking at the performance of the two models, we still believe that Model3.1 is a better choice given the number of feature, number of extreme predictions, and  overall accuracy in predicting Tc. 
+
+Even though clearly both of the models are an example of overfitting, due to time and complexity, we are not going to do feature selection such as stepwise algorithm or regularization as we did before. We decided to leave it as it. Still, we will observe and analyze its performance when we try fitting the test set on it.
+```{r}
+# Visualizing Model 3.1 error
+p1<- ggplot() +
+  geom_point(aes(x = training_set$critical_temp, y = pred_train3.1),colour = 'orangered3',alpha=0.5,size=2) +
+  ggtitle('Model 3.1 Performance on Trainig Set') +
+  theme(plot.title = element_text(size = 10)) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + theme_light()
+
+# Visualizing Model 3.2 error
+p2<- ggplot() +
+  geom_point(aes(x = training_set$critical_temp, y = pred_train3.2),colour = 'rosybrown',alpha=0.5,size=2) +
+  ggtitle('Model 3.2 Performance on Trainig Set') +
+  theme(plot.title = element_text(size = 10)) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + theme_light()
+
+# Visualizing Model 3.1 error after removing wild predictions
+p3<- ggplot() +
+  geom_point(aes(x = validation_set$critical_temp[pred_v3.1 < high], y = filtered3.1),colour = 'orangered3',alpha=0.5,size=3) +
+  ggtitle(paste0('Model 3.1 Performance on Validation Set \n(with ',num_extremes3.1,' extreme predictions removed)')) +
+  theme(plot.title = element_text(size = 10)) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + theme_light()
+
+# Visualizing Model 3.2 results after removing wild predictions
+p4<- ggplot() +
+  geom_point(aes(x = validation_set$critical_temp[pred_v3.2 < high], y = filtered3.2),colour = 'rosybrown',alpha=0.5,size=3) +
+  ggtitle(paste0('Model 3.2 Performance on Validation Set \n(with ',num_extremes3.2,' extreme predictions removed)')) +
+  theme(plot.title = element_text(size = 10)) +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + theme_light()
+
+grid.arrange(p1, p2, p3,p4,nrow=2)
+```
+
+
+
+#### Generalization of Error
+Now that we have chosen our third model,we are going to assess the performance of our model on the test set as usual.
+We already expected to see a significantly large MSE due to extreme predictions we observed in the training set and the validation set results. 
+```{r}
+# Predicting Tc on test set
+predLog_test3.1 <- predict(fit3.1, newdata = test_set)
+pred_test3.1 <- exp(predLog_test3.1)
+
+# Calculates RMSE
+rmse_test3.1 <- RMSE(pred_test3.1, test_set$critical_temp)
+cat("\nMODEL 3.1: RMSE for the test predictions =", rmse_test3.1)
+```
+
+
+
+#### Visualization of Genralized Error
+Judging by the MSE, it is obvious that there are extreme predictions for sure. 
+Turns out its less than 1%, not too bad. Let's filter them out before plotting.
+```{r}
+#high <- max(validation_set$critical_temp)
+filtered <- pred_test3.1[pred_test3.1 < high]
+num_extremes <- length(pred_test3.1) - length(filtered)
+
+# rsquared and mse after removing extremes 
+rsq_test3.1 <- cor(filtered, test_set$critical_temp[pred_test3.1 < high])^2
+adj.rmse_test3.1 <- RMSE(filtered,test_set$critical_temp[pred_test3.1 < high])
+
+cat("MODEL3.1: Number of extreme predictions on the test set = ",num_extremes)
+cat("\nMODEL3.1: Proportion of extreme predictions in the test set =",num_extremes/nrow(test_set))
+cat("\n(After removing extreme observations) test RMSE =",adj.rmse_test3.1)
+#cat("\n(After removing extreme observations) adj.rsquared =",rsq_test3.1)
+```
+
+
+We are going to fit the test set to our extremely complex third model and visualize the prediction.
+From the plot below, we can see a strong linear relationship between true values and the predicted values. Although we got around 1% extreme predictions on the test set, we still did a fairly good job on predicting Tc using our third model.
+```{r}
+# Visualizing generalization error
+featureCrosses_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp[pred_test3.1 < high], y = filtered),
+             colour = 'orangered3',alpha=0.5,size=3) +
+  ggtitle(paste0('Feature Crosses (with ',num_extremes,' extreme predictions removed)')) +
+  ylab('Prediction') +
+  xlab('True Value') +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+featureCrosses_test 
+```
+
+
+## 3.2 Random Forest
+Random Forest algorithm is an ensemble learning method for classification as well as regression that leverages the power of multiple decision trees for making decisions. Not only is this algorithm better than linear regression at capturing non-linear relationships, by introducing a technique called **bagging** to the traditional Decision Tree Algorithm, it also improves the problem of overfitting to the training data. 
+
+Bagging (Bootstrap aggregating) here is a method designed to reduces variance and helps to avoid overfitting. By sampling from a training set $D$ uniformly(randomly) and with replacement, we get $n$ different bootstrap samples for building $m$ decision trees. We then combine the results of the $m$ tress by averaging the output (for regression) or voting (for classification).  
+```{r}
+random_forest_model <- train(
+critical_temp ~., data = training_set,
+trControl = trainControl( method = "cv", number = 10, search = "random"), tuneLength = 5,
+method = "ranger",
+importance = 'impurity',
+preProc = c("range")
+)
+```
+
+```{r}
+# random forest training results
+random_forest_model$results
+```
+
+```{r}
+# random forest with optimised tuning perameters
+random_forest_model$bestTune
+random_forest_model$finalModel
+```
+
+
+```{r}
+# List of features with their importance scores
+rf_features <- varImp(random_forest_model)
+print(rf_features$importance)
+```
+
+
+### Generalization of Error
+```{r}
+# Predicting Tc for training/test
+pred_test_rf = predict(random_forest_model, newdata = test_set)
+rmse_test_rf <- RMSE(pred_test_rf,test_set$critical_temp)
+# Calculates RMSE of training pred
+cat("\nRandom Forest Model: RMSE for the test predictions =", rmse_test_rf)
+```
+
+### Visualization of Gernerailzed Error
+```{r}
+# Visualizing the fit
+rf_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp, y = pred_test_rf),
+            colour = 'gold',alpha=0.5,size=3) +
+  ggtitle('Random Forest') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + 
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+rf_test
+```
+
+
+## 3.3 Gradient Boosting
+In addition to Random Forest, we will try another ensemble learning method called Gradient Boosting. Similar to Random Firest algorithm, it builds a set of decision tress with bootstrapping and then combine the results to make a prediction.  
+
+However, the way they build those trees are different. Random Forests build each tree independently, thus it doesnt matter in what order you build the tress. On the other hand, Gradient Boosting algorithm builds one tree at a time, introducing a new tree to improve the mistakes (residuals) made by the previous one by trying to minimise the loss using gradient descent algorithm. Similar to other boosting methods, gradient boosting combines weak "learners" into a single strong learner in such iterative fashion.
+
+```{r}
+# Gradient Boosting Machine
+gb_model <- train(
+  critical_temp ~ ., data = training_set,
+  method = "gbm",
+  tuneLength = 3,
+  preProc = c("range"),
+  trControl = trainControl( method = "cv", number = 10, search = "random", verbose = FALSE)
+) 
+
+gb_model$results
+```
+
+
+```{r}
+gb_model$bestTune
+gb_model$finalModel
+```
+
+### Generalization of Error
+```{r}
+# Predicting Tc for training/test
+pred_test_gb = predict(gb_model, newdata = test_set)
+rmse_test_gb <- RMSE(pred_test_gb,test_set$critical_temp)
+
+# Calculates RMSE of training pred
+cat("\nGradient Boosting Model: RMSE for the test predictions =", rmse_test_gb)
+```
+
+### Visualization of Gernerailzed Error
+```{r}
+# Visualizing the fit
+gb_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp, y = pred_test_gb),
+            colour = 'deeppink1',alpha=0.5,size=3) +
+  ggtitle('Gradient Boosting') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)') + 
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+gb_test
+```
+
+
+## 3.4 K-Nearest-Neighbor Regression
+KNN is a non-parametric and instance-based learning, and the only tuning parameter in this algorithm is k, the number neighbors (closest training examples) in the feature space. To make a prediction for an unseen datapoint (a query vector), we simply find the k nearest training examples with the smnallest Euclidean distance to it and take the average as output. 
+```{r}
+knn_model <- train(critical_temp ~ ., 
+                   method = "knn",
+                   tuneGrid = expand.grid(k = c(1:5)), trControl = trainControl(method = "cv", number = 10),
+                   data = training_set,
+                   preProc = c("center", "scale","BoxCox"))
+
+knn_model$results
+```
+
+```{r}
+knn_model$bestTune
+knn_model$finalModel
+```
+
+
+### Generalization of Error
+```{r}
+# Predicting Tc for training/test
+pred_test_knn = predict(knn_model, newdata = test_set)
+rmse_test_knn <- RMSE(pred_test_knn,test_set$critical_temp)
+# Calculates RMSE of training pred
+cat("\nKNN Model: RMSE for the test predictions =", rmse_test_knn)
+```
+
+### Visualization of Gernerailzed Error
+```{r}
+# Visualizing the fit
+knn_test <- ggplot() +
+  geom_point(aes(x = test_set$critical_temp, y = pred_test_knn),
+            colour = 'red',alpha=0.5,size=3) +
+  ggtitle('K Nearest Neighbor') +
+  ylab('Prediction') +
+  xlab('True Value (Tc)')  +
+  theme_minimal() + 
+  geom_abline(colour = "grey80", size = 1)
+
+knn_test
+```
+
+
+# 4. Model Comparison
+```{r}
+model <- c("Liner_regression",
+            "Lasso_regression",
+            "Linear_reg_featureCrosses",
+            "Random_forest",
+            "Gradient_boosting",
+            "KNN"
+            )
+
+rmse <- c(round(rmse_test1.3,4),
+                      round(rmse_test2.2,4),
+                      "HUGE (Overfitting)",
+                      round(rmse_test_rf,4),
+                      round(rmse_test_gb,4),
+                      round(rmse_test_knn,4))
+
+
+models.test.metrics <- data.frame(model,rmse) 
+models.test.metrics
+```
+
+Putting them all together, we can tell that the non-linear models clearly did a better job in general. At least the relationship between the true values and the predictions is much stronger. Unlike our linear regression models, there isn't a gap or a shift in between the Y=X trend.
+```{r}
+plot_results <- grid.arrange(Linear_regression_test + theme(plot.title = element_text(size = 10),
+                                            axis.title.x = element_text(size=7),
+                                            axis.title.y = element_text(size=7)),
+             
+             Lasso_regression_test + theme(plot.title = element_text(size = 10),
+                                           axis.title.x = element_text(size=7),
+                                           axis.title.y = element_text(size=7)),
+             
+             featureCrosses_test + theme(plot.title = element_text(size = 10),
+                                         axis.title.x = element_text(size=7),
+                                         axis.title.y = element_text(size=7)),
+             
+             rf_test + theme(plot.title = element_text(size = 10),
+                             axis.title.x = element_text(size=7),
+                             axis.title.y = element_text(size=7)),
+             
+             gb_test + theme(plot.title = element_text(size = 10),
+                             axis.title.x = element_text(size=7),
+                             axis.title.y = element_text(size=7)),
+             
+             knn_test + theme(plot.title = element_text(size = 10),
+                              axis.title.x = element_text(size=7),
+                             axis.title.y = element_text(size=7)),
+             nrow=2)
+
+```
+
+
+# 5. Conclusion
+In the beginning we explore the relationships between features and the label. We observed correlations between some of the features, however, there seemed to be no obvious linear relationship between features and the label. So then it makes sense that the linear regression models perform poorly while other non-linear models such as Random Forest and Gradient Boosting outperformed its counterpart using clever methods like bagging and boosting. Even thought we tried encoding the nonlinearity and got a better predictive power for the linear regression, we still suffered from overfitting.
+Finally, we saw that KNN, the non-parametric model, performs pretty well on the test data, just a little worse than those ensenble learning models. To sum up, Random_forest was the best model while the overfitting linear regression (with thousands of feature crosses) was the worst.
+
+
+# 5. Discussion
+We have gone through different scenarios in this project. We first tried to improve the linear regression models through feature engineering, feature transformation, and then we dealth with an overfitting model that had thousands of engineered features. Finally, we realised non-linear models, even with raw input data, significantly outperformed any kind of linear regression models. It tells us that a non-linear problem requires a non-linear solution. 
+
+
+Also, all three of the non-linear models performed well with just the full set of raw features, we can still expect them to perform maybe slightly better with the pre-processed features. For example, for algorithms that rely on calculating distance for classification or regression such as KNN, if the feature space is too sparse or too large, calculating the Euclidean distance and searching for neighbors becomes inefficient and this algorithm may suffer from the curse of dimensionality where all vectors are almost equidistant to the search query vector. In this case, pre-processing steps such as feature extraction and dimension reduction performed on the full size raw data can help avoid the effects of the curse of dimensionality.
+
+
+# Reference
+1. https://machinelearningmastery.com/feature-selection-with-the-caret-r-package/
+2. https://data.library.virginia.edu/diagnostic-plots/#targetText=Scale%2DLocation,equally%20(randomly)%20spread%20points.
+3. https://www.coursera.org/learn/ml-regression/home/welcome
+4. https://www.youtube.com/watch?v=ctmNq7FgbvI
+5. https://en.wikipedia.org/wiki/Gradient_boosting
+6. https://www.nature.com/subjects/superconductors
